@@ -320,14 +320,14 @@ function App() {
 
   // --- Render ---
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-slate-950">
+    <div className="flex h-screen w-full overflow-hidden bg-[#0a0a0a] text-slate-200 font-sans selection:bg-blue-500/30">
       {/* Sidebar: Logs */}
-      <div className="w-1/4 min-w-[250px] max-w-[350px] hidden md:block">
+      <div className="w-80 hidden xl:block border-r border-slate-800 bg-[#0a0a0a] shrink-0 z-20">
         <LogsPanel logs={logs} />
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 relative z-10">
         {workflowState === WorkflowState.REFLECTING ? (
           <ChatInterface
             messages={messages}
