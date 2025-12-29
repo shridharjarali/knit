@@ -135,187 +135,185 @@ function App() {
 
   // 3. Execution Loop
   useEffect(() => {
-    if (workflowState === WorkflowState.EXECUTING && !isProcessing) {
-      const pendingTask = tasks.find(t => t.status === 'pending');
-
-      if (!pendingTask) {
-        // Check if all done
-        if (tasks.every(t => t.status === 'completed' || t.status === 'failed')) {
-          setWorkflowState(WorkflowState.FINISHED);
-          addLog(AgentType.ORCHESTRATOR, 'System', 'All tasks execution cycle finished.', 'success');
-        }
-        return;
-      }
-
-      // Check dependencies - find the first task where all dependencies are completed
-      const taskToRun = tasks.find(t =>
+    if (workflowState === WorkflowState.EXECUTING) {
+      // Find ALL executable tasks that are pending and have dependencies met
+      const executableTasks = tasks.filter(t =>
         t.status === 'pending' &&
         t.dependencies.every(dId => tasks.find(pt => pt.id === dId)?.status === 'completed')
       );
 
-      // If we have pending tasks but none are ready, it means we are either waiting or blocked (e.g. dep failed)
-      // For now, if a dependency failed, we probably should fail this task too.
-      if (!taskToRun) {
-        const failedDepTask = tasks.find(t =>
-          t.status === 'pending' &&
-          t.dependencies.some(dId => tasks.find(pt => pt.id === dId)?.status === 'failed')
-        );
+      // If no executable tasks found
+      if (executableTasks.length === 0) {
+        // Check if all done
+        if (tasks.every(t => t.status === 'completed' || t.status === 'failed')) {
+          setWorkflowState(WorkflowState.FINISHED);
+          addLog(AgentType.ORCHESTRATOR, 'System', 'All tasks execution cycle finished. Artifact ready for download.', 'success');
+        } else {
+           // Check for blocked tasks (dependencies failed)
+           const failedDepTasks = tasks.filter(t =>
+            t.status === 'pending' &&
+            t.dependencies.some(dId => tasks.find(pt => pt.id === dId)?.status === 'failed')
+          );
 
-        if (failedDepTask) {
-          addLog(AgentType.ORCHESTRATOR, 'System', `Task ${failedDepTask.title} blocked by failed dependency. Marking failed.`, 'error');
-          setTasks(prev => prev.map(t => t.id === failedDepTask.id ? { ...t, status: 'failed' } : t));
+          if (failedDepTasks.length > 0) {
+            failedDepTasks.forEach(t => {
+               addLog(AgentType.ORCHESTRATOR, 'System', `Task ${t.title} blocked by failed dependency. Marking failed.`, 'error');
+            });
+            setTasks(prev => prev.map(t => failedDepTasks.find(ft => ft.id === t.id) ? { ...t, status: 'failed' } : t));
+          }
         }
         return;
       }
 
-      const runTask = async () => {
-        setIsProcessing(true);
-        const startTime = Date.now();
+      // Mark tasks as in-progress immediately to prevent double-launching
+      setTasks(prev => prev.map(t => executableTasks.find(et => et.id === t.id) ? { ...t, status: 'in-progress' } : t));
 
-        // A. Check for Reusable Agent in Registry
-        const dynamicName = taskToRun.dynamicAgentName || `${taskToRun.assignedTo} Sub-Unit`;
-        const agentId = Math.random().toString(36).substr(2, 5);
-        const retryLabel = (taskToRun.retryCount || 0) > 0 ? `(Retry #${taskToRun.retryCount})` : '';
+      // Launch each task in parallel
+      executableTasks.forEach(taskToRun => {
+        const runTask = async () => {
+          // A. Check for Reusable Agent in Registry
+          const dynamicName = taskToRun.dynamicAgentName || `${taskToRun.assignedTo} Sub-Unit`;
+          const agentId = Math.random().toString(36).substr(2, 5);
+          const retryLabel = (taskToRun.retryCount || 0) > 0 ? `(Retry #${taskToRun.retryCount})` : '';
 
-        // Try to find a matching agent in the registry
-        const matchResult = findMatchingAgent(taskToRun);
-        const isReusing = matchResult && matchResult.score >= 0.5;
-        let registryAgentId: string | undefined;
+          // Try to find a matching agent in the registry
+          const matchResult = findMatchingAgent(taskToRun);
+          const isReusing = matchResult && matchResult.score >= 0.5;
+          let registryAgentId: string | undefined;
 
-        if (isReusing && matchResult) {
-          addLog(AgentType.ORCHESTRATOR, 'Registry',
-            `♻️ Reusing agent: ${matchResult.agent.name} (${Math.round(matchResult.score * 100)}% match)`, 'success');
-          addLog(AgentType.ORCHESTRATOR, 'Registry',
-            `Reason: ${matchResult.reason}`, 'info');
-          registryAgentId = matchResult.agent.id;
-        } else {
-          addLog(AgentType.SYNTHESIZER, 'System',
-            `🆕 Spawning new agent: ${dynamicName} ${retryLabel}`, 'info');
-        }
+          if (isReusing && matchResult) {
+            addLog(AgentType.ORCHESTRATOR, 'Registry',
+              `♻️ Reusing agent: ${matchResult.agent.name} (${Math.round(matchResult.score * 100)}% match)`, 'success');
+            addLog(AgentType.ORCHESTRATOR, 'Registry',
+              `Reason: ${matchResult.reason}`, 'info');
+            registryAgentId = matchResult.agent.id;
+          } else {
+            addLog(AgentType.SYNTHESIZER, 'System',
+              `🆕 Spawning new agent: ${dynamicName} ${retryLabel}`, 'info');
+          }
 
-        const newAgent: DynamicAgent = {
-          id: agentId,
-          name: isReusing ? matchResult!.agent.name : dynamicName,
-          parentType: taskToRun.assignedTo,
-          role: taskToRun.description,
-          status: 'active',
-          registryId: registryAgentId,
-          isReused: isReusing,
-          reuseScore: matchResult?.score,
-          currentPhase: 'planning'
+          const newAgent: DynamicAgent = {
+            id: agentId,
+            name: isReusing ? matchResult!.agent.name : dynamicName,
+            parentType: taskToRun.assignedTo,
+            role: taskToRun.description,
+            status: 'active',
+            registryId: registryAgentId,
+            isReused: isReusing,
+            reuseScore: matchResult?.score,
+            currentPhase: 'planning'
+          };
+          setActiveAgents(prev => [...prev, newAgent]);
+          
+          let plan = "";
+          let approved = false;
+          let critiqueFeedback = "";
+          let planAttempts = 0;
+          const MAX_PLAN_RETRIES = 3;
+
+          // B. Planning Loop
+          setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'planning' } : a));
+          addLog(AgentType.DYNAMIC, newAgent.name, `📝 [${taskToRun.title}] Drafting execution plan...`, 'info');
+
+          while (!approved && planAttempts < MAX_PLAN_RETRIES) {
+            // Generate Plan
+            // Note: We use the current knowledgeBase state. In a real parallel system, this might need a mutex or atomic updates,
+            // but for this simulation, reading the state at start of loop is acceptable.
+            plan = await generateAgentPlan(taskToRun, dynamicName, knowledgeBase, critiqueFeedback);
+            addInteraction(taskToRun.id, 'agent', `Proposed Plan (v${planAttempts + 1}):\n${plan}`);
+
+            // Critique Plan
+            addLog(AgentType.CRITIQUE, 'Sentinel', `[${taskToRun.title}] Reviewing plan v${planAttempts + 1}...`, 'critique');
+            const planCritique = await critiquePlan(taskToRun, plan, dynamicName);
+
+            addInteraction(taskToRun.id, 'critique', planCritique.approved
+              ? "Plan Approved. Proceed with execution."
+              : `Plan Rejected. Issues: ${planCritique.feedback}`);
+
+            if (planCritique.approved) {
+              approved = true;
+            } else {
+              critiqueFeedback = planCritique.feedback;
+              planAttempts++;
+              addLog(AgentType.CRITIQUE, 'Sentinel', `[${taskToRun.title}] Plan rejected. Requesting revision.`, 'warning');
+            }
+          }
+
+          if (!approved) {
+            addLog(AgentType.CRITIQUE, 'Sentinel', `[${taskToRun.title}] Task failed: Could not agree on a valid plan after ${MAX_PLAN_RETRIES} attempts.`, 'error');
+            // Handle Retry logic for Planning Failure
+            handleTaskFailure(taskToRun, agentId);
+            return;
+          }
+
+          // C. Execution
+          setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'executing' } : a));
+          addLog(AgentType.DYNAMIC, newAgent.name, `⚡ [${taskToRun.title}] Executing approved plan...`, 'info');
+          const executionResult = await executeTaskStep(taskToRun, newAgent.name, plan, knowledgeBase);
+          addInteraction(taskToRun.id, 'agent', `Execution Result:\n${executionResult.result}`);
+
+          // D. Critique Result
+          setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'reviewing' } : a));
+          addLog(AgentType.CRITIQUE, 'Sentinel', `🔍 [${taskToRun.title}] Reviewing execution result...`, 'info');
+          const resultCritique = await critiqueResult(taskToRun, executionResult.result);
+          addInteraction(taskToRun.id, 'critique', resultCritique.approved ? "✅ Result Validated." : `❌ Result Unsatisfactory: ${resultCritique.feedback}`);
+
+          if (resultCritique.approved) {
+            addLog(AgentType.CRITIQUE, 'Sentinel', `✅ [${taskToRun.title}] Result validated.`, 'success');
+
+            // Update Knowledgebase
+            setKnowledgeBase(prev => prev + `\n\nTask: ${taskToRun.title}\nResult: ${executionResult.result}`);
+
+            // Register or update agent in registry
+            if (registryAgentId) {
+              updateAgentMetrics(registryAgentId, true);
+              addLog(AgentType.ORCHESTRATOR, 'Registry', `📊 Updated metrics for: ${newAgent.name}`, 'info');
+            } else {
+              const prompt = `You are ${newAgent.name}. Parent: ${taskToRun.assignedTo}.`;
+              const registered = registerAgent(taskToRun, newAgent.name, prompt);
+              addLog(AgentType.ORCHESTRATOR, 'Registry', `📝 Registered new agent: ${registered.name}`, 'success');
+              setRegisteredAgents(getAllAgents());
+            }
+
+            // Mark complete
+            setTasks(prev => prev.map(t => t.id === taskToRun.id ? { ...t, status: 'completed', result: executionResult.result } : t));
+            setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, status: 'completed' } : a));
+
+            // Cleanup Agent
+            setTimeout(() => setActiveAgents(prev => prev.filter(a => a.id !== agentId)), 2000);
+
+          } else {
+            // Result Failure
+            addLog(AgentType.CRITIQUE, 'Sentinel', `[${taskToRun.title}] Result sub-par.`, 'error');
+            handleTaskFailure(taskToRun, agentId);
+          }
         };
-        setActiveAgents(prev => [...prev, newAgent]);
-        setTasks(prev => prev.map(t => t.id === taskToRun.id ? { ...t, status: 'in-progress' } : t));
 
-        let plan = "";
-        let approved = false;
-        let critiqueFeedback = "";
-        let planAttempts = 0;
-        const MAX_PLAN_RETRIES = 3;
+        const handleTaskFailure = (task: SubTask, agentId: string) => {
+          const currentRetries = task.retryCount || 0;
+          const MAX_TASK_RETRIES = 2;
 
-        // B. Planning Loop
-        setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'planning' } : a));
-        addLog(AgentType.DYNAMIC, newAgent.name, "📝 Drafting execution plan...", 'info');
-
-        while (!approved && planAttempts < MAX_PLAN_RETRIES) {
-          // Generate Plan
-          plan = await generateAgentPlan(taskToRun, dynamicName, knowledgeBase, critiqueFeedback);
-          addInteraction(taskToRun.id, 'agent', `Proposed Plan (v${planAttempts + 1}):\n${plan}`);
-
-          // Critique Plan
-          addLog(AgentType.CRITIQUE, 'Sentinel', `Reviewing plan v${planAttempts + 1}...`, 'critique');
-          const planCritique = await critiquePlan(taskToRun, plan, dynamicName);
-
-          addInteraction(taskToRun.id, 'critique', planCritique.approved
-            ? "Plan Approved. Proceed with execution."
-            : `Plan Rejected. Issues: ${planCritique.feedback}`);
-
-          if (planCritique.approved) {
-            approved = true;
+          if (currentRetries < MAX_TASK_RETRIES) {
+            addLog(AgentType.ORCHESTRATOR, 'System', `[${task.title}] Task failed. Initiating retry (${currentRetries + 1}/${MAX_TASK_RETRIES})...`, 'warning');
+            setTasks(prev => prev.map(t => t.id === task.id ? {
+              ...t,
+              status: 'pending',
+              retryCount: currentRetries + 1
+            } : t));
           } else {
-            critiqueFeedback = planCritique.feedback;
-            planAttempts++;
-            addLog(AgentType.CRITIQUE, 'Sentinel', "Plan rejected. Requesting revision.", 'warning');
-          }
-        }
-
-        if (!approved) {
-          addLog(AgentType.CRITIQUE, 'Sentinel', `Task failed: Could not agree on a valid plan after ${MAX_PLAN_RETRIES} attempts.`, 'error');
-          // Handle Retry logic for Planning Failure
-          handleTaskFailure(taskToRun, agentId);
-          return;
-        }
-
-        // C. Execution
-        setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'executing' } : a));
-        addLog(AgentType.DYNAMIC, newAgent.name, `⚡ Executing approved plan...`, 'info');
-        const executionResult = await executeTaskStep(taskToRun, newAgent.name, plan, knowledgeBase);
-        addInteraction(taskToRun.id, 'agent', `Execution Result:\n${executionResult.result}`);
-
-        // D. Critique Result
-        setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, currentPhase: 'reviewing' } : a));
-        addLog(AgentType.CRITIQUE, 'Sentinel', `🔍 Reviewing execution result...`, 'info');
-        const resultCritique = await critiqueResult(taskToRun, executionResult.result);
-        addInteraction(taskToRun.id, 'critique', resultCritique.approved ? "✅ Result Validated." : `❌ Result Unsatisfactory: ${resultCritique.feedback}`);
-
-        if (resultCritique.approved) {
-          addLog(AgentType.CRITIQUE, 'Sentinel', `✅ Result validated. Logic: ${executionResult.logic.substring(0, 50)}...`, 'success');
-
-          // Update Knowledgebase
-          setKnowledgeBase(prev => prev + `\n\nTask: ${taskToRun.title}\nResult: ${executionResult.result}`);
-
-          // Register or update agent in registry
-          if (registryAgentId) {
-            updateAgentMetrics(registryAgentId, true);
-            addLog(AgentType.ORCHESTRATOR, 'Registry', `📊 Updated metrics for: ${newAgent.name}`, 'info');
-          } else {
-            const prompt = `You are ${newAgent.name}. Parent: ${taskToRun.assignedTo}.`;
-            const registered = registerAgent(taskToRun, newAgent.name, prompt);
-            addLog(AgentType.ORCHESTRATOR, 'Registry', `📝 Registered new agent: ${registered.name}`, 'success');
-            setRegisteredAgents(getAllAgents());
+            addLog(AgentType.ORCHESTRATOR, 'System', `[${task.title}] Task failed after ${MAX_TASK_RETRIES} retries. Marking as permanently failed.`, 'error');
+            setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'failed' } : t));
           }
 
-          // Mark complete
-          setTasks(prev => prev.map(t => t.id === taskToRun.id ? { ...t, status: 'completed', result: executionResult.result } : t));
-          setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, status: 'completed' } : a));
-
-          // Cleanup Agent
+          // Terminate current agent
+          setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, status: 'terminated' } : a));
           setTimeout(() => setActiveAgents(prev => prev.filter(a => a.id !== agentId)), 2000);
+        };
 
-        } else {
-          // Result Failure
-          addLog(AgentType.CRITIQUE, 'Sentinel', `Result sub-par.`, 'error');
-          handleTaskFailure(taskToRun, agentId);
-        }
-
-        setIsProcessing(false);
-      };
-
-      const handleTaskFailure = (task: SubTask, agentId: string) => {
-        const currentRetries = task.retryCount || 0;
-        const MAX_TASK_RETRIES = 2;
-
-        if (currentRetries < MAX_TASK_RETRIES) {
-          addLog(AgentType.ORCHESTRATOR, 'System', `Task failed. Initiating retry (${currentRetries + 1}/${MAX_TASK_RETRIES})...`, 'warning');
-          setTasks(prev => prev.map(t => t.id === task.id ? {
-            ...t,
-            status: 'pending',
-            retryCount: currentRetries + 1
-          } : t));
-        } else {
-          addLog(AgentType.ORCHESTRATOR, 'System', `Task failed after ${MAX_TASK_RETRIES} retries. Marking as permanently failed.`, 'error');
-          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'failed' } : t));
-        }
-
-        // Terminate current agent
-        setActiveAgents(prev => prev.map(a => a.id === agentId ? { ...a, status: 'terminated' } : a));
-        setTimeout(() => setActiveAgents(prev => prev.filter(a => a.id !== agentId)), 2000);
-        setIsProcessing(false);
-      };
-
-      runTask();
+        runTask();
+      });
     }
-  }, [workflowState, tasks, isProcessing, addLog, knowledgeBase]);
+  }, [workflowState, tasks, addLog, knowledgeBase]);
 
 
   // --- Render ---
@@ -341,6 +339,7 @@ function App() {
             activeAgents={activeAgents}
             workflowState={workflowState}
             knowledgeBase={knowledgeBase}
+            registeredAgents={registeredAgents}
             onReset={handleReset}
           />
         )}

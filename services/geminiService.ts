@@ -95,6 +95,10 @@ export const orchestratePlan = async (
     - Logical flow: Research -> Planning -> Implementation -> Review.
     - If Task B requires output from Task A, list Task A's ID in Task B's dependencies.
     - Ensure the graph is acyclic.
+    - **PARALLELISM**: Identify tasks that can be executed in parallel (independent of each other) to speed up the process. 
+      - Example: "Frontend Component A" and "Frontend Component B" can be built simultaneously if they don't depend on each other.
+      - Example: "Database Schema Design" and "API Interface Definition" can often happen in parallel.
+      - Do NOT create artificial dependencies. If Task B does not strictly need Task A's output, do not link them.
     
     Return a JSON array of tasks.
   `;
@@ -197,6 +201,12 @@ export const executeTaskStep = async (
     
     Task: ${task.title}
     Details: ${task.description}
+
+    OUTPUT GUIDELINES:
+    1. Your result must be high-quality and directly usable by other agents.
+    2. If generating code, use markdown code blocks.
+    3. If generating data, use structured formats (JSON, tables).
+    4. Be concise but complete. The output will be stored in the central Knowledge Base.
   `;
 
   const prompt = `
