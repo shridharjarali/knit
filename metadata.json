@@ -1,0 +1,5 @@
+{
+  "name": "Nexus: Agentic Framework",
+  "description": "A recursive, multi-agent AI framework featuring Collector, Contextualizer, Synthesizer, and Reflector agents with a self-correcting Critique loop and dynamic orchestration.",
+  "requestFramePermissions": []
+}
